@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from dateutil.relativedelta import relativedelta
 from functools import lru_cache
 
+
 import click
 import requests
 import yaml
@@ -22,6 +23,7 @@ import reconcile.jenkins_plugins as jenkins_base
 from reconcile.utils.mr import CreateAppInterfaceReporter
 from reconcile import mr_client_gateway
 from reconcile.jenkins_job_builder import init_jjb
+from reconcile.jenkins_job_builder import get_openshift_saas_deploy_job_name
 from reconcile.cli import (
     config_file,
     log_level,
@@ -87,7 +89,13 @@ class Report:
         # promotions
         self.add_report_section(
             'production_promotions',
-            self.get_activity_content(self.app.get('promotions'))
+            self.app.get('promotions')
+        )
+
+        # saas deploy jobs
+        self.add_report_section(
+            'saas_deploy_jobs',
+            self.app.get('saas_deploy_jobs')
         )
 
         # merges to master
@@ -368,6 +376,32 @@ class Report:
             for repo, results in activity.items()
         ]
 
+    @staticmethod
+    def get_promotions_content(activity):
+        if not activity:
+            return []
+        
+        promotions_history = {}
+        for repo, results in activity.items():
+            for env, history in results.items():
+                if repo not in promotions_history:
+                    promotions_history[repo] = {env: {"total": int(history[0]),  "success": int(history[1])}}
+                else:
+                    promotions_history[repo].update({env: {"total": int(history[0]),  "success": int(history[1])}})
+        return promotions_history
+
+    def get_saas_deploy_content(activity):
+        if not activity:
+            return []
+        
+        saas_deploy_history = {}
+        for env, history in activity.items():
+            if repo not in deploy_job_history:
+                saas_deploy_history[env] = {"total": int(history[0]),  "success": int(history[1])}
+            else:
+                saas_deploy_history[env].update({"total": int(history[0]),  "success": int(history[1])})
+        return deploy_job_history
+
 
 @lru_cache()
 def get_performance_parameters():
@@ -417,17 +451,73 @@ def get_performance_parameters():
 def get_apps_data(date, month_delta=1):
     apps = queries.get_apps()
     saas_files = queries.get_saas_files()
+    # with open('saas_files.json', 'w') as fp:
+    #     json.dump(saas_files, fp)
+    # print("saas_files",saas_files)
     jjb, _ = init_jjb()
+    saas_deploy_jobs = jjb.get_all_jobs(job_types=['saas-deploy'])
+    # with open('saas_deploy_jobs.json', 'w') as fp:
+    #     json.dump(saas_deploy_jobs, fp)
+    # print("saas_deploy_jobs",saas_deploy_jobs)
+    
     saas_jobs = jjb.get_all_jobs(job_types=['saas-deploy', 'promote-to-prod'])
+    # with open('saas_jobs.json', 'w') as fp:
+    #     json.dump(saas_jobs, fp)
+
+    promotion_jobs = jjb.get_all_jobs(job_types=['promote-to-prod'])
+    # with open('promote_jobs.json', 'w') as fp:
+    #     json.dump(promote_jobs, fp)
+
+    # build_jobs = jjb.get_all_jobs(job_types=['build'])
+    # with open('build_jobs.json', 'w') as fp:
+    #     json.dump(build_jobs, fp)
+
     build_master_jobs = jjb.get_all_jobs(job_types=['build-master'])
+    # with open('build_master_jobs.json', 'w') as fp:
+    #     json.dump(build_master_jobs, fp)
     jenkins_map = jenkins_base.get_jenkins_map()
+    print("!!!!!!jenkins_map.keys()", jenkins_map.keys())
+
     time_limit = date - relativedelta(months=month_delta)
     timestamp_limit = \
         int(time_limit.replace(tzinfo=timezone.utc).timestamp())
+    settings = queries.get_app_interface_settings()
+    with open('saas_deploy_history.json') as f:
+      saas_deploy_history = json.load(f)
+    # saas_deploy_history = {} # app: [{env: total}]
+    # for saas_file in saas_files:
+    #     saas_file_name = saas_file['name']
+    #     app_name = saas_file["app"]["name"]
+    #     instance_url = saas_file["instance"]["serverUrl"]
+    #     instance_name = saas_file["instance"]["name"]
+    #     for template in saas_file["resourceTemplates"]:
+    #         for target in template["targets"]:
+    #             env_name = target["namespace"]["environment"]["name"]
+    #             job_name = get_openshift_saas_deploy_job_name(saas_file_name, env_name, settings)
+    #             build_history = jenkins_map[instance_name].get_build_history(job_name, timestamp_limit)
+    #             if app_name not in saas_deploy_history:
+    #                 saas_deploy_history[app_name] = {env_name: build_history}
+    #             else:
+    #                 saas_deploy_history[app_name].update({env_name: build_history})
+    # with open('saas_deploy_history.json', 'w') as fp:
+    #     json.dump(saas_deploy_history, fp)
+
     saas_build_history = \
         get_build_history(jenkins_map, saas_jobs, timestamp_limit)
+    # with open('saas_build_history.json', 'w') as fp:
+    #     json.dump(saas_build_history, fp)
+
+    promotion_build_history = \
+        get_promotion_build_history(jenkins_map, promotion_jobs, timestamp_limit)
+
+    with open('promotion_build_history.json', 'w') as fp:
+        json.dump(promotion_build_history, fp)
+
     build_master_build_history = \
         get_build_history(jenkins_map, build_master_jobs, timestamp_limit)
+    # with open('build_master_build_history .json', 'w') as fp:
+    #     json.dump(build_master_build_history , fp)
+    # print("build_master_build_history ", build_master_build_history )
 
     settings = queries.get_app_interface_settings()
     secret_reader = SecretReader(settings=settings)
@@ -439,6 +529,9 @@ def get_apps_data(date, month_delta=1):
                            auth=(dashdotdb_user, dashdotdb_pass)).text
     namespaces = queries.get_namespaces()
 
+    saas_repos_lst = []
+    promotions_lst = []
+    saas_deploy_lst = []
     for app in apps:
         if not app['codeComponents']:
             continue
@@ -499,11 +592,35 @@ def get_apps_data(date, month_delta=1):
         saas_repos = [c['url'] for c in app['codeComponents']
                       if c['resource'] == 'saasrepo']
         for sr in saas_repos:
-            sr_history = saas_build_history.get(sr)
-            if not sr_history:
-                continue
-            successes = [h for h in sr_history if h == 'SUCCESS']
-            app['promotions'][sr] = (len(sr_history), len(successes))
+            if sr not in saas_repos_lst:
+                saas_repos_lst.append(sr)
+            promotion_history = promotion_build_history.get(sr)
+            if promotion_history:
+                for env, history in promotion_history.items():
+                    successes = [h for h in history if h == 'SUCCESS']
+                    if sr not in app["promotions"]:
+                        app["promotions"][sr] = {env: {"total": len(history), "success" : len(successes)}}
+                    else:
+                        app["promotions"][sr].update({env: {"total": len(history), "success" : len(successes)}})
+        if app['promotions']:
+            promotions_lst.append({app_name: app['promotions']})
+            with open('production_promotions.json','w') as f: 
+                json.dump(app['promotions'], f) 
+
+
+        logging.info(f"collecting saas_deploy_jobs for {app_name}")
+        app["saas_deploy_jobs"] = {}
+        if app_name in saas_deploy_history:
+            for env, history in saas_deploy_history[app_name].items():
+                if history:
+                    successes = [h for h in history if h == 'SUCCESS']
+                    app["saas_deploy_jobs"][env] = {"total": len(history), "success" : len(successes)}
+
+        if app["saas_deploy_jobs"]:
+            saas_deploy_lst.append({app_name: app['saas_deploy_jobs']})
+            with open('app_saas_deploy.json','w') as f: 
+                json.dump(app["saas_deploy_jobs"], f) 
+
 
         logging.info(f"collecting merge activity for {app_name}")
         app['merge_activity'] = {}
@@ -515,6 +632,10 @@ def get_apps_data(date, month_delta=1):
                 continue
             successes = [h for h in cr_history if h == 'SUCCESS']
             app['merge_activity'][cr] = (len(cr_history), len(successes))
+
+        with open('merge_activity.json', 'w') as fp:
+            json.dump(app['merge_activity'], fp)
+            print("merge_activity",app['merge_activity'])
 
         logging.info(f"collecting dashdotdb information for {app_name}")
         app_namespaces = []
@@ -568,7 +689,11 @@ def get_apps_data(date, month_delta=1):
 
         app['container_vulnerabilities'] = vuln_mx
         app['deployment_validations'] = validt_mx
-
+    print("saas repos list", saas_repos_lst)
+    with open('promotions_lst.json','w') as f: 
+        json.dump(promotions_lst, f) 
+    with open('saas_deploy_lst.json','w') as f: 
+        json.dump(saas_deploy_lst, f) 
     return apps
 
 
@@ -584,6 +709,38 @@ def get_build_history(jenkins_map, jobs, timestamp_limit):
             history[repo_url] = build_history
 
     return history
+
+def get_promotion_build_history(jenkins_map, jobs, timestamp_limit):
+    history = {} 
+    job_names = []
+    name_env_lst = []
+    for instance, jobs in jobs.items():
+        jenkins = jenkins_map[instance]
+        for job in jobs:
+            logging.info(f"getting build history for {job['name']}")
+            build_history = \
+                jenkins.get_build_history(job['name'], timestamp_limit)
+            repo_url = get_repo_url(job)
+            job_env = get_promotion_job_env(job['name'])
+            if repo_url not in history:
+                history[repo_url] = {job_env: build_history}
+            else:
+                history[repo_url].update({job_env: build_history})
+            job_names.append(job['name'])
+            name_env_lst.append((job['name'], job_env))
+
+    with open('job_names.json', 'w') as fp:
+        json.dump(job_names, fp)
+    with open('name_env_lst.json', 'w') as fp:
+        json.dump(name_env_lst, fp)
+    with open('history.json', 'w') as fp:
+        json.dump(history, fp)
+    return history
+
+def get_promotion_job_env(job_name):
+    env_idx = job_name.find("promote-to-prod")
+    env_name = job_name[env_idx:]
+    return env_name
 
 
 def get_repo_url(job):
