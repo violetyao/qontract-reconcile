@@ -101,7 +101,7 @@ class Report:
         # merges to master
         self.add_report_section(
             'merges_to_master',
-            self.get_activity_content(self.app.get('merge_activity'))
+            self.app.get('merge_activity')
         )
         # Container Vulnerabilities
         self.add_report_section(
@@ -472,7 +472,8 @@ def get_apps_data(date, month_delta=1):
     # with open('build_jobs.json', 'w') as fp:
     #     json.dump(build_jobs, fp)
 
-    build_master_jobs = jjb.get_all_jobs(job_types=['build-master'])
+    # build_master_jobs = jjb.get_all_jobs(job_types=['build-master'])
+    build_jobs = jjb.get_all_jobs(job_types=['build'])
     # with open('build_master_jobs.json', 'w') as fp:
     #     json.dump(build_master_jobs, fp)
     jenkins_map = jenkins_base.get_jenkins_map()
@@ -513,8 +514,10 @@ def get_apps_data(date, month_delta=1):
     with open('promotion_build_history.json', 'w') as fp:
         json.dump(promotion_build_history, fp)
 
-    build_master_build_history = \
-        get_build_history(jenkins_map, build_master_jobs, timestamp_limit)
+    # build_master_build_history = \
+    #     get_build_history(jenkins_map, build_master_jobs, timestamp_limit)
+    build_history = \
+        get_build_env_history(jenkins_map, build_jobs, timestamp_limit)
     # with open('build_master_build_history .json', 'w') as fp:
     #     json.dump(build_master_build_history , fp)
     # print("build_master_build_history ", build_master_build_history )
@@ -627,11 +630,15 @@ def get_apps_data(date, month_delta=1):
         code_repos = [c['url'] for c in app['codeComponents']
                       if c['resource'] == 'upstream']
         for cr in code_repos:
-            cr_history = build_master_build_history.get(cr)
+            cr_history = build_history.get(cr)
             if not cr_history:
                 continue
-            successes = [h for h in cr_history if h == 'SUCCESS']
-            app['merge_activity'][cr] = (len(cr_history), len(successes))
+            for env, history in cr_history.items():
+                successes = [h for h in history if h == 'SUCCESS']
+                if cr not in app["merge_activity"]:
+                    app["merge_activity"][cr] = {env: {"total": len(history), "success" : len(successes)}}
+                else:
+                    app["merge_activity"][cr].update({env: {"total": len(history), "success" : len(successes)}})
 
         with open('merge_activity.json', 'w') as fp:
             json.dump(app['merge_activity'], fp)
@@ -707,6 +714,31 @@ def get_build_history(jenkins_map, jobs, timestamp_limit):
                 jenkins.get_build_history(job['name'], timestamp_limit)
             repo_url = get_repo_url(job)
             history[repo_url] = build_history
+
+    return history
+
+def get_build_env_history(jenkins_map, jobs, timestamp_limit):
+    history = {}
+    for instance, jobs in jobs.items():
+        jenkins = jenkins_map[instance]
+        for job in jobs:
+            logging.info(f"getting build history for {job['name']}")
+            build_history = \
+                jenkins.get_build_history(job['name'], timestamp_limit)
+            try:
+                if 'id' in job:
+                    job_env = job['id']
+                elif 'build_branch' in job:
+                    job_env = job['build_branch']
+                else:
+                    continue
+                repo_url = get_repo_url(job)
+                if repo_url not in history:
+                    history[repo_url] = {job_env: build_history}
+                else:
+                    history[repo_url].update({job_env: build_history})
+            except KeyError:
+                print(f"get_repo url failed for {job}")
 
     return history
 
