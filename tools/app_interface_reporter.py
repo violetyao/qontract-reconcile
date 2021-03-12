@@ -13,6 +13,7 @@ from dateutil.relativedelta import relativedelta
 
 import reconcile.utils.gql as gql
 import reconcile.utils.config as config
+import reconcile.utils.threaded as threaded
 from reconcile.utils.secret_reader import SecretReader
 import reconcile.queries as queries
 import reconcile.jenkins_plugins as jenkins_base
@@ -198,7 +199,9 @@ class Report:
         ]
 
 
-def get_apps_data(date, month_delta=1):
+def get_apps_data(date, month_delta=1, thread_pool_size=10):
+    import time
+    start_time = time.time()
     apps = queries.get_apps()
     saas_files = queries.get_saas_files()
     jjb, _ = init_jjb()
@@ -208,7 +211,7 @@ def get_apps_data(date, month_delta=1):
     timestamp_limit = \
         int(time_limit.replace(tzinfo=timezone.utc).timestamp())
     build_jobs_history = \
-        get_build_history(jenkins_map, build_jobs, timestamp_limit)
+        get_build_history_pool(jenkins_map, build_jobs, timestamp_limit, thread_pool_size)
 
     settings = queries.get_app_interface_settings()
     secret_reader = SecretReader(settings=settings)
@@ -220,33 +223,23 @@ def get_apps_data(date, month_delta=1):
                            auth=(dashdotdb_user, dashdotdb_pass)).text
     namespaces = queries.get_namespaces()
 
-    saas_deploy_history = {}
+    saas_deploy_jobs = {}
     for saas_file in saas_files:
         saas_file_name = saas_file['name']
-        app_name = saas_file["app"]["name"]
-        instance_name = saas_file["instance"]["name"]
         for template in saas_file["resourceTemplates"]:
             for target in template["targets"]:
-                env_name = target["namespace"]["environment"]["name"]
-                job_name = get_openshift_saas_deploy_job_name(
-                    saas_file_name, env_name, settings
+                job = {}
+                job['branch'] = target["namespace"]["environment"]["name"]
+                job['name'] = get_openshift_saas_deploy_job_name(
+                    saas_file_name, job['branch'], settings
                 )
-                logging.info(f"getting build history for {job_name}")
-                try:
-                    build_history = \
-                        jenkins_map[instance_name].get_build_history(
-                            job_name, timestamp_limit
-                        )
-                    if app_name not in saas_deploy_history:
-                        saas_deploy_history[app_name] = {
-                            env_name: build_history}
-                    else:
-                        saas_deploy_history[app_name].update(
-                            {env_name: build_history}
-                        )
-                except requests.exceptions.HTTPError:
-                    logging.info(f"getting build history failed \
-                        for {job_name}")
+                job['instance'] = saas_file["instance"]["name"]
+                job['app'] = saas_file["app"]["name"]
+                if job['instance'] not in saas_deploy_jobs:
+                    saas_deploy_jobs[job['instance']] = [job]
+                else:
+                    saas_deploy_jobs[job['instance']].append(job)
+    saas_deploy_history = get_build_history_pool(jenkins_map, saas_deploy_jobs, timestamp_limit, thread_pool_size)
 
     for app in apps:
         if not app['codeComponents']:
@@ -393,35 +386,52 @@ def get_apps_data(date, month_delta=1):
 
         app['container_vulnerabilities'] = vuln_mx
         app['deployment_validations'] = validt_mx
-
+    print("Elapsed Time : {} s".format(time.time()-start_time))
     return apps
 
 
-def get_build_history(jenkins_map, jobs, timestamp_limit):
-    history = {}
+def get_build_history(job):
+    try:
+        logging.info(f"getting build history for {job['name']}")
+        job['build_history'] = job['jenkins'].get_build_history(job['name'], job['timestamp_limit'])
+    except requests.exceptions.HTTPError:
+        logging.info(f"getting build history failed \
+                    for {job['name']}")
+    return job
+
+
+def get_build_history_pool(jenkins_map, jobs, timestamp_limit, thread_pool_size):
+    history_to_get = []
     for instance, jobs in jobs.items():
         jenkins = jenkins_map[instance]
         for job in jobs:
-            logging.info(f"getting build history for {job['name']}")
             try:
-                repo_url = get_repo_url(job)
+                # job_key is 'app' for saas_deploy_jobs and 'repo_url' for merge_activity
+                if 'app' in job:
+                    job_key = job['app']
+                else:
+                    job_key = get_repo_url(job)
             except KeyError:
                 logging.info(f"getting build history failed \
                     for {job['name']}")
                 continue
-            job_env = job['branch']
-            try:
-                build_history = \
-                    jenkins.get_build_history(job['name'], timestamp_limit)
-                repo_url = get_repo_url(job)
-                if repo_url not in history:
-                    history[repo_url] = {job_env: build_history}
-                else:
-                    history[repo_url].update({job_env: build_history})
-            except requests.exceptions.HTTPError:
-                logging.info(f"getting build history failed \
-                    for {job['name']}")
-                continue
+            job['job_key'] = job_key
+            job['jenkins'] = jenkins
+            job['timestamp_limit'] = timestamp_limit
+            history_to_get.append(job)
+
+    result = threaded.run(func=get_build_history,
+                          iterable=history_to_get,
+                          thread_pool_size=thread_pool_size)
+
+    history = {}
+    for job in result:
+        if 'build_history' not in job:
+            continue
+        if job['job_key'] not in history:
+            history[job['job_key']] = {job['branch']: job['build_history']}
+        else:
+            history[job['job_key']].update({job['branch']: job['build_history']})
 
     return history
 
