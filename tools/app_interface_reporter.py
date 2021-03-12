@@ -315,23 +315,21 @@ def get_apps_data(date, month_delta=1, thread_pool_size=10):
             cr_history = build_jobs_history.get(cr)
             if not cr_history:
                 continue
-            for env, history in cr_history.items():
+            for branch, history in cr_history.items():
                 if not history:
                     continue
                 successes = [h for h in history if h == 'SUCCESS']
                 if cr not in app["merge_activity"]:
-                    app["merge_activity"][cr] = {
-                        env: {
-                            "total": len(history),
-                            "success": len(successes)
-                        }
-                    }
+                    app["merge_activity"][cr] = [{
+                        "branch": branch, 
+                        "total": len(history),
+                        "success": len(successes)
+                        }]
                 else:
-                    app["merge_activity"][cr].update({
-                        env: {
-                            "total": len(history),
-                            "success": len(successes)
-                        }
+                    app["merge_activity"][cr].append({
+                        "branch": branch, 
+                        "total": len(history),
+                        "success": len(successes)
                     })
 
         logging.info(f"collecting dashdotdb information for {app_name}")
@@ -395,8 +393,7 @@ def get_build_history(job):
         logging.info(f"getting build history for {job['name']}")
         job['build_history'] = job['jenkins'].get_build_history(job['name'], job['timestamp_limit'])
     except requests.exceptions.HTTPError:
-        logging.info(f"getting build history failed \
-                    for {job['name']}")
+        logging.debug(f"{job['name']}: get build history failed")
     return job
 
 
@@ -412,8 +409,7 @@ def get_build_history_pool(jenkins_map, jobs, timestamp_limit, thread_pool_size)
                 else:
                     job_key = get_repo_url(job)
             except KeyError:
-                logging.info(f"getting build history failed \
-                    for {job['name']}")
+                logging.debug(f"{job['name']}: no repo_url found")
                 continue
             job['job_key'] = job_key
             job['jenkins'] = jenkins
